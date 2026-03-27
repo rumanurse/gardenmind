@@ -302,9 +302,10 @@ function addToCalendar(taskText, dateHint) {
   recognition.lang = 'en-US';
 
   recognition.onresult = e => {
-    // Get the single best transcript and slam it directly into the box
+    const transcript = e.results[e.results.length - 1][0].transcript.trim();
     const ta = document.getElementById('msg');
-    ta.value = e.results[e.results.length - 1][0].transcript.trim();
+    const existing = ta.value.trim();
+    ta.value = existing ? existing + ' ' + transcript : transcript;
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
     const btn = document.getElementById('sendBtn');
@@ -313,7 +314,12 @@ function addToCalendar(taskText, dateHint) {
   };
 
   recognition.onend = () => {
-    setListeningUI(false);
+    // If still supposed to be listening, restart automatically
+    if (isListening) {
+      try { recognition.start(); } catch(e) {}
+    } else {
+      setListeningUI(false);
+    }
   };
 
   recognition.onerror = e => {
