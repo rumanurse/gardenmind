@@ -155,6 +155,17 @@
 
 
 <!-- TOAST -->
+<!-- API KEY MODAL -->
+<div id="keyModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:200;display:flex;align-items:center;justify-content:center;padding:24px;">
+  <div style="background:#111118;border:1px solid rgba(212,168,83,0.25);border-radius:20px;padding:28px;max-width:420px;width:100%;">
+    <div style="font-size:11px;letter-spacing:4px;color:#8b7355;text-transform:uppercase;margin-bottom:12px;">one time setup</div>
+    <div style="font-size:22px;font-weight:400;color:#d4a853;margin-bottom:8px;">Enter your API Key</div>
+    <div style="font-size:13px;color:#6b6055;line-height:1.6;margin-bottom:20px;">Get yours free at <strong style="color:#c8a96e;">console.anthropic.com</strong> → API Keys. It stays on your device only. 💛</div>
+    <input id="keyInput" type="password" placeholder="sk-ant-..." style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(212,168,83,0.2);border-radius:12px;padding:12px 16px;color:#e8e0d5;font-size:14px;outline:none;font-family:monospace;margin-bottom:12px;" />
+    <button onclick="saveKey()" style="width:100%;background:linear-gradient(135deg,#d4a853,#c8902a);color:#0a0a0f;border:none;border-radius:12px;padding:13px;font-size:15px;cursor:pointer;font-family:'Georgia',serif;font-weight:bold;">Save & Start →</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <!-- INPUT DOCK -->
@@ -178,6 +189,28 @@ let loading = false;
 let currentFilter = 'all';
 let isListening = false;
 let recognition = null;
+let API_KEY = localStorage.getItem('bd_apikey') || '';
+
+// ─── API KEY ──────────────────────────────────────────────────────────────────
+function checkKey() {
+  const modal = document.getElementById('keyModal');
+  if (!API_KEY) {
+    modal.style.display = 'flex';
+  } else {
+    modal.style.display = 'none';
+  }
+}
+function saveKey() {
+  const val = document.getElementById('keyInput').value.trim();
+  if (!val.startsWith('sk-')) { 
+    document.getElementById('keyInput').style.borderColor = '#FF4757';
+    return; 
+  }
+  API_KEY = val;
+  localStorage.setItem('bd_apikey', val);
+  document.getElementById('keyModal').style.display = 'none';
+  toast('✅ Key saved! You\'re all set.');
+}
 
 const PRIORITY = {
   urgent: { color: '#FF4757', dot: '🔴' },
@@ -220,21 +253,17 @@ function toast(msg, duration = 2500) {
     return;
   }
   recognition = new SR();
-  recognition.continuous = true;
-  recognition.interimResults = true;
+  recognition.continuous = false;
+  recognition.interimResults = false;
   recognition.lang = 'en-US';
 
   recognition.onresult = e => {
-    let interim = '', final = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      e.results[i].isFinal ? (final += t) : (interim += t);
-    }
+    const transcript = Array.from(e.results)
+      .map(r => r[0].transcript)
+      .join(' ')
+      .trim();
     const ta = document.getElementById('msg');
-    let base = ta.value.replace(/\[…[^\]]*\]/g, '').trimEnd();
-    ta.value = final
-      ? (base + ' ' + final).trim()
-      : (base + (interim ? ` […${interim}]` : '')).trim();
+    ta.value = transcript;
     autoResize(ta);
     updateSendBtn();
   };
@@ -326,7 +355,12 @@ async function handleSend() {
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
@@ -441,6 +475,7 @@ function escHtml(s) {
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
+checkKey();
 render();
 updateSendBtn();
 </script>
