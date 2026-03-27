@@ -152,25 +152,7 @@
   </div>
 </div>
 
-<!-- MIC RECORDING OVERLAY -->
-<div id="micOverlay">
-  <div class="mic-modal">
-    <div class="mic-orb idle" id="micOrb">🎙️</div>
-    <div class="mic-modal-title" id="micTitle">Ready to record</div>
-    <div class="mic-modal-sub" id="micSub">Tap the mic to start speaking.<br/>Ramble freely — I'll sort it out.</div>
-    <div class="mic-waveform" id="waveform">
-      <div class="wave-bar" style="height:6px"></div>
-      <div class="wave-bar" style="height:6px"></div>
-      <div class="wave-bar" style="height:6px"></div>
-      <div class="wave-bar" style="height:6px"></div>
-      <div class="wave-bar" style="height:6px"></div>
-      <div class="wave-bar" style="height:6px"></div>
-      <div class="wave-bar" style="height:6px"></div>
-    </div>
-    <button class="btn-stop-mic" id="stopMicBtn" onclick="stopRecording()">Done — process this</button>
-    <button class="btn-cancel-mic" onclick="cancelRecording()">cancel</button>
-  </div>
-</div>
+
 
 <!-- TOAST -->
 <div id="toast"></div>
@@ -180,7 +162,7 @@
   <div class="input-wrap">
     <textarea id="msg" rows="2" placeholder="I need to call my mom, laundry is piling up, forgot that email…" oninput="autoResize(this)" onkeydown="handleKey(event)"></textarea>
     <div class="btn-col">
-      <button class="btn-mic" id="micBtn" onclick="openMic()" title="Voice input">🎙️</button>
+      <button class="btn-mic" id="micBtn" onclick="toggleVoice()" title="Voice input">🎙️</button>
       <button class="btn-send" id="sendBtn" onclick="handleSend()" disabled>↑</button>
     </div>
   </div>
@@ -194,14 +176,8 @@ let completedIds = new Set(JSON.parse(localStorage.getItem('bd_done') || '[]'));
 let messages = [];
 let loading = false;
 let currentFilter = 'all';
-
-// Recording state
-let mediaRecorder = null;
-let audioChunks = [];
-let recordingActive = false;
-let waveInterval = null;
-let analyser = null;
-let audioCtx = null;
+let isListening = false;
+let recognition = null;
 
 const PRIORITY = {
   urgent: { color: '#FF4757', dot: '🔴' },
@@ -236,217 +212,81 @@ function toast(msg, duration = 2500) {
   setTimeout(() => el.classList.remove('show'), duration);
 }
 
-// ─── MIC / RECORDING ─────────────────────────────────────────────────────────
-async function openMic() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    startRecording(stream);
-  } catch (err) {
-    if (err.name === 'NotAllowedError') {
-      toast('🚫 Mic permission denied — check your browser settings');
-    } else if (err.name === 'NotFoundError') {
-      toast('🎙️ No mic found on this device');
-    } else {
-      toast('⚠️ Could not access mic: ' + err.message);
+// ─── VOICE (Web Speech API) ───────────────────────────────────────────────────
+(function initVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    document.getElementById('micBtn').style.display = 'none';
+    return;
+  }
+  recognition = new SR();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = 'en-US';
+
+  recognition.onresult = e => {
+    let interim = '', final = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      e.results[i].isFinal ? (final += t) : (interim += t);
+    }
+    const ta = document.getElementById('msg');
+    let base = ta.value.replace(/\[…[^\]]*\]/g, '').trimEnd();
+    ta.value = final
+      ? (base + ' ' + final).trim()
+      : (base + (interim ? ` […${interim}]` : '')).trim();
+    autoResize(ta);
+    updateSendBtn();
+  };
+
+  recognition.onend = () => {
+    setListeningUI(false);
+    const ta = document.getElementById('msg');
+    ta.value = ta.value.replace(/\[…[^\]]*\]/g, '').trim();
+    updateSendBtn();
+  };
+
+  recognition.onerror = e => {
+    setListeningUI(false);
+    if (e.error === 'not-allowed') toast('🚫 Mic permission denied — allow it in Chrome settings');
+    else if (e.error !== 'aborted') toast('⚠️ Mic error: ' + e.error);
+  };
+})();
+
+function toggleVoice() {
+  if (!recognition) { toast('Voice not supported on this browser'); return; }
+  if (isListening) {
+    recognition.stop();
+    setListeningUI(false);
+  } else {
+    document.getElementById('msg').value = '';
+    updateSendBtn();
+    try {
+      recognition.start();
+      setListeningUI(true);
+      setReply('Listening… just speak freely, sayang 🎙️');
+    } catch(e) {
+      toast('Could not start mic — try again');
     }
   }
 }
 
-function startRecording(stream) {
-  audioChunks = [];
-  recordingActive = true;
+function setListeningUI(on) {
+  isListening = on;
+  const mic = document.getElementById('micBtn');
+  const wrap = document.getElementById('inputWrap');
+  const ta = document.getElementById('msg');
+  const hint = document.getElementById('inputHint');
 
-  // Setup analyser for waveform
-  try {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioCtx.createMediaStreamSource(stream);
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 64;
-    source.connect(analyser);
-    animateWaveform();
-  } catch(e) {}
-
-  // Pick best supported format
-  const mimeType = ['audio/webm', 'audio/mp4', 'audio/ogg']
-    .find(m => MediaRecorder.isTypeSupported(m)) || '';
-
-  mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-  mediaRecorder.onstop = processRecording;
-  mediaRecorder.start(200);
-
-  // UI
-  const overlay = document.getElementById('micOverlay');
-  const orb = document.getElementById('micOrb');
-  const title = document.getElementById('micTitle');
-  const sub = document.getElementById('micSub');
-  const stopBtn = document.getElementById('stopMicBtn');
-
-  overlay.classList.add('show');
-  orb.textContent = '⏺';
-  orb.classList.remove('idle');
-  title.textContent = 'Recording…';
-  sub.textContent = 'Just talk. Ramble. Vent. I\'m catching everything.';
-  stopBtn.textContent = 'Done — process this';
-}
-
-function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
-  document.getElementById('micTitle').textContent = 'Processing…';
-  document.getElementById('stopMicBtn').textContent = 'Working on it… ✨';
-  document.getElementById('stopMicBtn').disabled = true;
-  mediaRecorder.stop();
-  mediaRecorder.stream.getTracks().forEach(t => t.stop());
-  stopWaveform();
-}
-
-function cancelRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stream.getTracks().forEach(t => t.stop());
-    mediaRecorder.stop();
-  }
-  stopWaveform();
-  closeMicOverlay();
-}
-
-function closeMicOverlay() {
-  recordingActive = false;
-  document.getElementById('micOverlay').classList.remove('show');
-  document.getElementById('micOrb').textContent = '🎙️';
-  document.getElementById('micOrb').classList.add('idle');
-  document.getElementById('stopMicBtn').disabled = false;
-}
-
-async function processRecording() {
-  closeMicOverlay();
-
-  if (!audioChunks.length) { toast('No audio captured, try again'); return; }
-
-  const mimeType = audioChunks[0].type || 'audio/webm';
-  const audioBlob = new Blob(audioChunks, { type: mimeType });
-
-  // Convert to base64
-  const base64 = await blobToBase64(audioBlob);
-  const base64Data = base64.split(',')[1];
-
-  setReply('<span class="spinner"></span>Transcribing your voice…', true);
-  loading = true; updateSendBtn();
-
-  try {
-    // Send audio to Claude for transcription + task extraction in one shot
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system: SYSTEM,
-        messages: [
-          ...messages,
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: 'I recorded a voice message. Please transcribe it and extract tasks from it. Here is the audio:'
-              },
-              {
-                type: 'document',
-                source: {
-                  type: 'base64',
-                  media_type: mimeType,
-                  data: base64Data
-                }
-              }
-            ]
-          }
-        ]
-      })
-    });
-
-    const data = await res.json();
-
-    // If audio document type fails, fall back to asking user to type
-    if (data.error) {
-      throw new Error(data.error.message || 'API error');
-    }
-
-    const raw = (data.content?.find(b => b.type === 'text')?.text || '{}')
-      .replace(/```json|```/g, '').trim();
-
-    let parsed;
-    try { parsed = JSON.parse(raw); }
-    catch {
-      // Maybe Claude returned plain text transcription — extract tasks from it
-      parsed = { tasks: [], reply: raw.substring(0, 120) };
-    }
-
-    const { tasks = [], reply = 'Got it.' } = parsed;
-
-    if (tasks.length > 0) {
-      const newItems = tasks.map((t, i) => ({
-        id: Date.now() + i,
-        text: t.text,
-        priority: t.priority || 'whenever',
-        category: t.category || 'other',
-      }));
-      todos = [...newItems, ...todos];
-      save();
-      toast(`✨ Added ${tasks.length} task${tasks.length > 1 ? 's' : ''}`);
-    } else {
-      toast('Hmm, no tasks found — try again?');
-    }
-
-    setReply(reply);
-    messages.push({ role: 'assistant', content: raw });
-
-  } catch (err) {
-    // Fallback: put transcription attempt in text box for manual send
-    setReply('Voice processing hit a snag 😅 — your words are in the text box, just hit send! 💛');
-    toast('⚠️ Fallback: check the text box');
-  }
-
-  loading = false; updateSendBtn(); render();
-}
-
-// ─── WAVEFORM ANIMATION ───────────────────────────────────────────────────────
-function animateWaveform() {
-  const bars = document.querySelectorAll('.wave-bar');
-  waveInterval = setInterval(() => {
-    if (analyser) {
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(data);
-      bars.forEach((bar, i) => {
-        const val = data[i * 2] || 0;
-        bar.style.height = Math.max(4, (val / 255) * 28) + 'px';
-        bar.style.opacity = 0.4 + (val / 255) * 0.6;
-      });
-    } else {
-      bars.forEach(bar => {
-        bar.style.height = (Math.random() * 22 + 4) + 'px';
-      });
-    }
-  }, 80);
-}
-
-function stopWaveform() {
-  if (waveInterval) clearInterval(waveInterval);
-  document.querySelectorAll('.wave-bar').forEach(b => b.style.height = '6px');
-  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
-}
-
-// ─── UTILS ────────────────────────────────────────────────────────────────────
-function blobToBase64(blob) {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result);
-    r.onerror = rej;
-    r.readAsDataURL(blob);
-  });
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  mic.textContent = on ? '⏹' : '🎙️';
+  mic.style.background = on ? 'linear-gradient(135deg,#FF4757,#c0392b)' : 'rgba(255,255,255,0.06)';
+  mic.style.color = on ? '#fff' : '#8b7355';
+  mic.style.animation = on ? 'orbPulse 1.2s ease-in-out infinite' : 'none';
+  wrap.style.borderColor = on ? 'rgba(255,71,87,0.4)' : 'rgba(212,168,83,0.18)';
+  wrap.style.background = on ? 'rgba(255,71,87,0.04)' : 'rgba(255,255,255,0.04)';
+  ta.placeholder = on ? 'Speak freely… catching every word 🎙️' : 'I need to call my mom, laundry is piling up, forgot that email…';
+  hint.textContent = on ? '🔴 recording… tap ⏹ to stop' : 'tap 🎙️ to speak · or just type & hit send';
+  hint.style.color = on ? '#FF4757' : '#3d3530';
 }
 
 // ─── TEXT INPUT ───────────────────────────────────────────────────────────────
@@ -474,6 +314,8 @@ async function handleSend() {
   const ta = document.getElementById('msg');
   const text = ta.value.trim();
   if (!text || loading) return;
+
+  if (isListening) { recognition.stop(); setListeningUI(false); }
 
   ta.value = ''; autoResize(ta);
   loading = true; updateSendBtn();
@@ -523,7 +365,7 @@ async function handleSend() {
   loading = false; updateSendBtn(); render();
 }
 
-function setReply(html, isLoading = false) {
+function setReply(html) {
   document.getElementById('aiReply').innerHTML = html;
 }
 
@@ -592,6 +434,10 @@ function render() {
         <button class="todo-del" onclick="deleteTodo(${todo.id})">×</button>
       </div>`;
   }).join('');
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
