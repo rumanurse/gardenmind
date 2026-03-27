@@ -250,9 +250,41 @@ function toast(msg, duration = 2500) {
 
 // ─── CALENDAR ────────────────────────────────────────────────────────────────
 function addToCalendar(taskText, dateHint) {
-  // Build a Google Calendar quick-add URL
-  const query = encodeURIComponent(taskText + (dateHint ? ' ' + dateHint : ''));
-  const url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(taskText)}&details=Added+from+GardenMind`;
+  // Parse dateHint into a Google Calendar dates param (YYYYMMDDTHHMMSS format)
+  let dates = '';
+  if (dateHint) {
+    try {
+      const now = new Date();
+      let d = new Date(dateHint);
+
+      // Handle relative terms
+      const hint = dateHint.toLowerCase();
+      if (hint.includes('today')) d = new Date(now);
+      else if (hint.includes('tomorrow')) { d = new Date(now); d.setDate(d.getDate() + 1); }
+
+      // Try to extract time like "3pm", "3:30pm", "15:00"
+      const timeMatch = hint.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+      if (timeMatch) {
+        let hours = parseInt(timeMatch[1]);
+        const mins = parseInt(timeMatch[2] || '0');
+        const ampm = timeMatch[3];
+        if (ampm === 'pm' && hours < 12) hours += 12;
+        if (ampm === 'am' && hours === 12) hours = 0;
+        d.setHours(hours, mins, 0, 0);
+      } else {
+        d.setHours(9, 0, 0, 0); // default 9am
+      }
+
+      if (!isNaN(d.getTime())) {
+        const pad = n => String(n).padStart(2, '0');
+        const fmt = dt => `${dt.getFullYear()}${pad(dt.getMonth()+1)}${pad(dt.getDate())}T${pad(dt.getHours())}${pad(dt.getMinutes())}00`;
+        const end = new Date(d.getTime() + 60 * 60 * 1000); // +1 hour
+        dates = `&dates=${fmt(d)}/${fmt(end)}`;
+      }
+    } catch(e) {}
+  }
+
+  const url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(taskText)}&details=${encodeURIComponent('Added from GardenMind')}${dates}`;
   window.open(url, '_blank');
 }
 
@@ -297,13 +329,14 @@ function toggleVoice() {
     recognition.stop();
     setListeningUI(false);
   } else {
-    // DON'T clear the text box — let it append
     try {
       recognition.start();
       setListeningUI(true);
       setReply('Listening… keep going, I\'m catching it all 🎙️');
     } catch(e) {
-      toast('Could not start mic — try again');
+      // Silently ignore — Android Chrome throws a false error but mic still starts
+      setListeningUI(true);
+      setReply('Listening… keep going, I\'m catching it all 🎙️');
     }
   }
 }
