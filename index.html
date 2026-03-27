@@ -142,11 +142,13 @@
 
   <div class="filters" id="filters" style="display:none">
     <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">all</button>
+    <button class="filter-btn" data-filter="RumaNurse" onclick="setFilter('RumaNurse')">🏥 RumaNurse</button>
+    <button class="filter-btn" data-filter="Araya" onclick="setFilter('Araya')">📋 Araya</button>
+    <button class="filter-btn" data-filter="Personal" onclick="setFilter('Personal')">✨ Personal</button>
     <button class="filter-btn" data-filter="urgent" onclick="setFilter('urgent')">🔴 urgent</button>
     <button class="filter-btn" data-filter="soon" onclick="setFilter('soon')">🟡 soon</button>
     <button class="filter-btn" data-filter="whenever" onclick="setFilter('whenever')">🟢 whenever</button>
     <button class="filter-btn" data-filter="done" onclick="setFilter('done')">✓ done</button>
-    <button class="clear-btn" id="clearBtn" style="display:none" onclick="clearDone()">clear done</button>
   </div>
 
   <div class="todo-list" id="todoList">
@@ -186,12 +188,19 @@
 // ─── STATE ────────────────────────────────────────────────────────────────────
 let todos = JSON.parse(localStorage.getItem('bd_todos') || '[]');
 let completedIds = new Set(JSON.parse(localStorage.getItem('bd_done') || '[]'));
+let completedAt = JSON.parse(localStorage.getItem('bd_completedat') || '{}');
 let messages = [];
 let loading = false;
 let currentFilter = 'all';
 let isListening = false;
 let recognition = null;
 let API_KEY = localStorage.getItem('bd_apikey') || '';
+
+const BUCKET_CONFIG = {
+  RumaNurse: { color: '#c8a96e', bg: 'rgba(200,169,110,0.12)', label: '🏥 RumaNurse' },
+  Araya:     { color: '#7eb8d4', bg: 'rgba(126,184,212,0.12)', label: '📋 Araya' },
+  Personal:  { color: '#a989c8', bg: 'rgba(169,137,200,0.12)', label: '✨ Personal' },
+};
 
 // ─── API KEY ──────────────────────────────────────────────────────────────────
 function checkKey() {
@@ -221,16 +230,17 @@ const PRIORITY = {
 };
 const CAT = { work:'💼', health:'🫀', personal:'✨', errands:'🛒', admin:'📋', creative:'🎨', family:'🏠', other:'📌' };
 
-const SYSTEM = `You are a gentle, zero-judgment task extraction assistant built for someone with ADHD and executive paralysis.
-Your ONLY job: extract actionable to-do items from whatever the user says — stream of consciousness, venting, rambling, half-sentences.
+const SYSTEM = `You are a gentle, zero-judgment task extraction assistant built for someone with ADHD and executive paralysis. Her name is Magda. She runs two businesses: RumaNurse (premium concierge nursing) and Araya Consulting (healthcare consulting/accreditation).
+Your ONLY job: extract actionable to-do items from whatever she says — stream of consciousness, venting, rambling, half-sentences.
 Rules:
 - Extract ALL implied tasks, not just explicit ones
 - Keep task names SHORT (under 8 words), action-first
 - Assign priority: "urgent" if they say today/tonight/now/ASAP, "soon" if this week/tomorrow, "whenever" otherwise
 - Assign category: work, health, personal, errands, admin, creative, family, or other
-- If a date or time is mentioned (today, tomorrow, Monday, 3pm, etc), extract it into a "date" field as a plain english string like "today", "tomorrow 3pm", "Monday", etc. Otherwise omit "date".
+- Assign a "bucket" field — one of: "RumaNurse", "Araya", "Personal". Infer from context: nursing/clients/concierge/private duty = RumaNurse, consulting/accreditation/JCAHO/ACHC/policy/compliance = Araya, everything else = Personal
+- If a date or time is mentioned (today, tomorrow, Monday, 3pm, etc), extract it into a "date" field as plain english like "today", "tomorrow 3pm", "Monday". Otherwise omit "date".
 - Return ONLY valid JSON, no markdown, no backticks
-- Format: { "tasks": [ { "text": "...", "priority": "...", "category": "...", "date": "..." } ], "reply": "..." }
+- Format: { "tasks": [ { "text": "...", "priority": "...", "category": "...", "bucket": "...", "date": "..." } ], "reply": "..." }
 - reply = warm, short 1-2 sentence encouraging response
 - If nothing actionable: { "tasks": [], "reply": "Got it, I'm here whenever you need me." }`;
 
@@ -238,6 +248,7 @@ Rules:
 function save() {
   localStorage.setItem('bd_todos', JSON.stringify(todos));
   localStorage.setItem('bd_done', JSON.stringify([...completedIds]));
+  localStorage.setItem('bd_completedat', JSON.stringify(completedAt));
 }
 
 // ─── TOAST ────────────────────────────────────────────────────────────────────
@@ -431,6 +442,7 @@ async function handleSend() {
         text: t.text,
         priority: t.priority || 'whenever',
         category: t.category || 'other',
+        bucket: t.bucket || 'Personal',
         date: t.date || null,
         addedAt: Date.now(),
       }));
@@ -454,17 +466,30 @@ function setReply(html) {
 
 // ─── ACTIONS ──────────────────────────────────────────────────────────────────
 function toggleDone(id) {
-  completedIds.has(id) ? completedIds.delete(id) : completedIds.add(id);
+  if (completedIds.has(id)) {
+    completedIds.delete(id);
+    delete completedAt[id];
+  } else {
+    completedIds.add(id);
+    completedAt[id] = Date.now();
+  }
   save(); render();
 }
 function deleteTodo(id) {
   todos = todos.filter(t => t.id !== id);
   completedIds.delete(id);
+  delete completedAt[id];
   save(); render();
 }
 function clearDone() {
+  const doneIds = [...completedIds];
   todos = todos.filter(t => !completedIds.has(t.id));
+  doneIds.forEach(id => delete completedAt[id]);
   completedIds = new Set();
+  save(); render();
+}
+function setBucket(id, bucket) {
+  todos = todos.map(t => t.id === id ? {...t, bucket} : t);
   save(); render();
 }
 function setFilter(f) {
@@ -483,12 +508,13 @@ function render() {
   document.getElementById('remainLabel').textContent = `${total - done} remaining`;
   document.getElementById('progressFill').style.width = total ? `${(done/total)*100}%` : '0%';
   document.getElementById('filters').style.display = total > 0 ? '' : 'none';
-  document.getElementById('clearBtn').style.display = done > 0 ? '' : 'none';
 
   let filtered = todos.filter(t => {
-    if (currentFilter === 'all') return !completedIds.has(t.id);
     if (currentFilter === 'done') return completedIds.has(t.id);
-    return t.priority === currentFilter && !completedIds.has(t.id);
+    if (currentFilter === 'all') return !completedIds.has(t.id);
+    if (['urgent','soon','whenever'].includes(currentFilter)) return t.priority === currentFilter && !completedIds.has(t.id);
+    if (['RumaNurse','Araya','Personal'].includes(currentFilter)) return t.bucket === currentFilter && !completedIds.has(t.id);
+    return !completedIds.has(t.id);
   });
 
   const list = document.getElementById('todoList');
@@ -497,24 +523,44 @@ function render() {
     list.innerHTML = `<div class="empty-state">Your list is empty.<br /><span>Just start talking below. 💛</span></div>`;
     return;
   }
-  if (!filtered.length) {
+  if (!filtered.length && currentFilter !== 'done') {
     list.innerHTML = `<div class="empty-state"><span>Nothing here for this filter.</span></div>`;
     return;
   }
+  if (!filtered.length && currentFilter === 'done') {
+    list.innerHTML = `<div class="empty-state"><span>No completed tasks yet. You got this! 💛</span></div>`;
+    return;
+  }
+
+  const clearDoneBtn = currentFilter === 'done' && done > 0
+    ? `<button onclick="clearDone()" style="width:100%;margin-top:16px;padding:12px;border-radius:12px;border:1px solid rgba(255,71,87,0.25);background:transparent;color:#FF4757;font-size:13px;cursor:pointer;font-family:'Georgia',serif;letter-spacing:0.5px;">🗑️ clear all completed</button>`
+    : '';
 
   list.innerHTML = filtered.map(todo => {
     const isDone = completedIds.has(todo.id);
     const p = PRIORITY[todo.priority] || PRIORITY.whenever;
     const icon = CAT[todo.category] || '📌';
+    const b = BUCKET_CONFIG[todo.bucket] || BUCKET_CONFIG.Personal;
+
     const calBtn = todo.date
       ? `<button class="todo-cal" onclick="addToCalendar('${escHtml(todo.text)}','${escHtml(todo.date || '')}')" title="Add to calendar">📅</button>`
       : '';
     const dateBadge = todo.date
-      ? `<span style="font-size:10px;color:#8b7355;margin-left:4px;">${escHtml(todo.date)}</span>`
+      ? `<span style="font-size:10px;color:#8b7355;margin-right:6px;">📅 ${escHtml(todo.date)}</span>`
       : '';
-    const addedBadge = todo.addedAt
-      ? `<span style="font-size:10px;color:#4a4035;white-space:nowrap;">⏱ ${timeAgo(todo.addedAt)}</span>`
+
+    const addedLine = todo.addedAt
+      ? `<span style="font-size:10px;color:#4a4035;">⏱ added ${timeAgo(todo.addedAt)}</span>`
       : '';
+    const doneLine = isDone && completedAt[todo.id]
+      ? `<span style="font-size:10px;color:#4a4035;margin-left:8px;">✓ done ${timeAgo(completedAt[todo.id])}</span>`
+      : '';
+
+    // Bucket pill — tappable to cycle through
+    const buckets = ['RumaNurse','Araya','Personal'];
+    const nextBucket = buckets[(buckets.indexOf(todo.bucket || 'Personal') + 1) % 3];
+    const bucketPill = `<button onclick="setBucket(${todo.id},'${nextBucket}')" style="font-size:10px;padding:2px 8px;border-radius:99px;border:1px solid ${b.color}33;background:${b.bg};color:${b.color};cursor:pointer;white-space:nowrap;flex-shrink:0;">${b.label}</button>`;
+
     return `
       <div class="todo-item ${isDone ? 'done' : ''}">
         <button class="todo-check ${isDone ? 'checked' : ''}"
@@ -522,14 +568,21 @@ function render() {
           onclick="toggleDone(${todo.id})">${isDone ? '✓' : ''}</button>
         <span class="todo-icon">${icon}</span>
         <div style="flex:1;min-width:0;">
-          <div class="todo-text ${isDone ? 'done' : ''}">${escHtml(todo.text)}${dateBadge}</div>
-          ${addedBadge}
+          <div class="todo-text ${isDone ? 'done' : ''}" style="margin-bottom:3px;">${escHtml(todo.text)}</div>
+          <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+            ${dateBadge}${addedLine}${doneLine}
+          </div>
         </div>
-        <span class="todo-dot">${p.dot}</span>
-        ${calBtn}
-        <button class="todo-del" onclick="deleteTodo(${todo.id})">×</button>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;">
+          ${bucketPill}
+          <div style="display:flex;gap:4px;align-items:center;">
+            <span style="font-size:9px;">${p.dot}</span>
+            ${calBtn}
+            <button class="todo-del" onclick="deleteTodo(${todo.id})">×</button>
+          </div>
+        </div>
       </div>`;
-  }).join('');
+  }).join('') + clearDoneBtn;
 }
 
 function timeAgo(ts) {
